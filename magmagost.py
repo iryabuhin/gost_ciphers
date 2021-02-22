@@ -1,21 +1,19 @@
 import random
+import struct
 import sys
 import csv
 import os
-import uuid
-import binascii
 from typing import List, Tuple, Dict, Callable, ByteString
 
+
+INPUT_FILE = 'input.txt'
+OUTPUT_FILE = 'output.txt'
 
 class KeyLengthError(RuntimeError):
     pass
 
-class BlockLengthError(RuntimeError):
+class BlockLengthError(Exception):
     pass
-
-class PaddingError(RuntimeError):
-    pass
-
 
 def get_random_key() -> int:
     while (key := random.getrandbits(256)).bit_length() != 256:
@@ -23,13 +21,11 @@ def get_random_key() -> int:
     return key
 
 
-def bytes_from_file(filename: str, chunksize: int = 655536):
-    """ Покусочное чтение файла.
-    Размер блока (chunk) по умолчанию - 2 байта
-    """
+def bytes_from_file(filename: str, chunksize: int = 8192):
     with open(filename, 'rb') as f:
         while chunk := f.read(chunksize):
             yield from chunk
+
 
 class MagmaGost:
     key: int
@@ -38,19 +34,19 @@ class MagmaGost:
 
     BLOCK_SIZE: int = 64
     KEY_LENGTH: int = 256
+    BUFFER_SIZE: int = 1024
 
-    def __init__(self, key: int, sbox_filepath: str):
+    def __init__(self, key: int, sbox_filepath: str) -> None:
         if key.bit_length() != MagmaGost.KEY_LENGTH:
             raise KeyLengthError(
                 'Key must be 256 bits long, current one is %d bit long' % key.bit_length()
             )
         self.key = key
-
         self.subkeys = self.expand_key(key)
         self.sbox = self.load_sbox_from_csv(sbox_filepath)
 
     @staticmethod
-    def expand_key(key: int):
+    def expand_key(key: int) -> List[int]:
         subkeys = list()
         for i in range(8):
             subkeys.append(
@@ -59,54 +55,54 @@ class MagmaGost:
         return subkeys
 
     def f(self, input: int, key: int):
-        assert input.bit_length() == 32, \
-            'Bit length of text part must be 32, got %d instead' % input.bit_length()
+        assert input.bit_length() <= 32, \
+            'Bit length of text part must be less than or equal 32, got %d instead' % input.bit_length()
+
         result = 0
-
-        tmp = input ^ key
-
+        sum = input ^ key
         for i in range(8):
             # замена в S-блоках
-            result |= self.perform_sblock_substitution(i, tmp)
-
+            result |= self.sbox_lookup(i, sum)
         # циклический сдвиг на 11 разрядов влево
         return ((result << 11) | (result >> 21)) & 0xffffffff
-        # return MagmaGost.circularshift_left(result, 11, max_bits=32)
 
-    def perform_sblock_substitution(self, row_idx: int, sum: int):
+    def sbox_lookup(self, row_idx: int, sum: int):
         col_idx = (sum >> (4 * row_idx)) & 0b1111
         subs = self.sbox[row_idx][col_idx]
-
         return subs << (4 * row_idx)
 
-    def split_block(self, block: int):
-        return block >> self.BLOCK_SIZE // 2, block & ((1 << self.BLOCK_SIZE//2) - 1)
+    def split_block(self, block: int) -> Tuple[int, int]:
+        return block >> (self.BLOCK_SIZE // 2), block & ((1 << (self.BLOCK_SIZE//2)) - 1)
 
-    def encrpyption_round(self, left: int, right: int, round_key: int):
-        right = right ^ self.f(right, round_key)
-        return left, right
+    def encryption_round(self, left: int, right: int, round_key: int) -> Tuple[int, int]:
+        return right, left ^ self.f(right, round_key)
 
-    def decryption_round(self, left: int, right: int, round_key: int):
-        right = right ^ self.f(left, round_key)
-        return left, right
+    def decryption_round(self, left: int, right: int, round_key: int) -> Tuple[int, int]:
+        return right ^ self.f(left, round_key), left
 
-    def encrypt(self, plaintext: int):
-        if plaintext.bit_length() != 64:
-            raise RuntimeError('Size of block must be 64 bits, got %d instead' % plaintext.bit_length())
+    def encrypt(self, plaintext: int) -> int:
+        """ Шифрование исходного сообщения (открытого текста)
+        :param int plaintext: Открытый текст для зашифрования (64 бита)
+        :return Зашифрованный текст (64 бита)
+        :rtype: int
+        """
+        if plaintext.bit_length() > 64:
+            raise RuntimeError('Size of block must be less than or equal 64 bits, got %d instead' % plaintext.bit_length())
 
-        left, right = self.split_block(plaintext)
+        # left, right = self.split_block(plaintext)
+        left = plaintext >> 32
+        right = plaintext & 0xffffffff
 
         for i in range(8 * 3):
-            left, right = self.encrpyption_round(left, right, self.subkeys[i])
+            left, right = self.encryption_round(left, right, self.subkeys[i % 8])
         for i in range(8):
-            left, right = self.encrpyption_round(left, right, self.subkeys[7-i])
+            left, right = self.encryption_round(left, right, self.subkeys[7 - i])
 
         return (left << 32) | right
 
-
     def decrypt(self, ciphertext: int):
-        if ciphertext.bit_length() != 64:
-            raise RuntimeError('Size of block must be 64 bits, got %d instead' % ciphertext.bit_length())
+        if ciphertext.bit_length() > 64:
+            raise RuntimeError('Size of block must be less than or equal to 64 bits, got %d instead' % ciphertext.bit_length())
 
         left, right = self.split_block(ciphertext)
 
@@ -115,7 +111,10 @@ class MagmaGost:
         for i in range(8 * 3):
             left, right = self.decryption_round(left, right, self.subkeys[(7-i) % 8])
 
-        return (left << self.BLOCK_SIZE // 2) | right
+        return (left << (self.BLOCK_SIZE // 2)) | right
+
+    def encrypt_file(self, filepath: str):
+        pass
 
     @staticmethod
     def circularshift_left(n: int, shift: int, max_bits: int = 32):
@@ -140,15 +139,29 @@ class MagmaGost:
 
 
 def main():
-    key = get_random_key()
-    text = 0xABCDEF0987654321
+    # Пример
+    # Ключ, указанный в приложении к стандарту ГОСТ 34.12-15 для блочных шифров
+    key = 0xffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
+    # a = 0xfedcba9876543210
 
+    text = 'hello123'
+    a, = struct.unpack(
+        'q',
+        bytes(text, encoding='utf-8')
+    )
     gost = MagmaGost(key, 'sblocks.csv')
 
-    ciphertext = gost.encrypt(text)
-    plaintext = gost.decrypt(ciphertext)
+    encrypted = gost.encrypt(a)
+    decrypted = gost.decrypt(encrypted)
 
-    assert plaintext == text, 'упс, не работает'
+    assert a == decrypted, 'упс, не работает'
+
+    print('Key (K):', hex(key))
+    print('Input (P):', hex(a))
+    print('E(P, K) = C =', hex(encrypted))
+    print('D(C, K) = P =', hex(decrypted))
+
+    return 0
 
 
 if __name__ == '__main__':
