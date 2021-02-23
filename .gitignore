@@ -5,6 +5,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Encrypted/decrypted test data
+*.enc
+*.dec
+
 # C extensions
 *.so
 
