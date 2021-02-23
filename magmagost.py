@@ -214,7 +214,7 @@ def main():
         description='Encrypt/decrypt using "Magma" symmetric block cipher'
     )
 
-    argparser.add_argument('-k', '--key', dest='key', type=str, metavar='KEY')
+    argparser.add_argument('-k', '--key', dest='key', type=str, metavar='KEY', help='key in hexadecimal notation')
     argparser.add_argument('-i', '--input-file', dest='input', nargs='?', metavar='INFILE',
         type=argparse.FileType('rb'),
         default=sys.stdin.buffer
@@ -230,8 +230,8 @@ def main():
     )
 
     action_mode = argparser.add_mutually_exclusive_group(required=True)
-    action_mode.add_argument('-e', '--encrypt', dest='encrypt', help='encrypt file/stdin', action='store_true')
-    action_mode.add_argument('-d', '--decrypt', dest='decrypt', help='decrypt file/stdout', action='store_true')
+    action_mode.add_argument('-e', '--encrypt', dest='encrypt', help='file to decrypt (stdin if none)', action='store_true')
+    action_mode.add_argument('-d', '--decrypt', dest='decrypt', help='file to decrypt (stdout if none)', action='store_true')
 
     argparser.add_argument('--buffer-size', dest='buffer_size', action='store', nargs='?', type=int, default=8*1024)
 
