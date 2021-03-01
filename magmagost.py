@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import array
 import random
 import string
 import struct
+import multiprocessing as mp
 import sys
 import csv
 import os
+import tqdm
 import typing
 from typing import List, Tuple, BinaryIO, Dict, Union, Optional
 from ansi_colors import Colors
@@ -68,14 +71,9 @@ class MagmaGost:
         sum = input ^ key
         for i in range(8):
             # замена в S-блоках
-            result |= self.sbox_lookup(i, sum)
+            result |= ((self.sbox[i][(sum >> (4 * i)) & 0b1111]) << (4 * i))
         # циклический сдвиг на 11 разрядов влево
         return ((result << 11) | (result >> 21)) & 0xffffffff
-
-    def sbox_lookup(self, row_idx: int, sum: int):
-        col_idx = (sum >> (4 * row_idx)) & 0b1111
-        subs = self.sbox[row_idx][col_idx]
-        return subs << (4 * row_idx)
 
     def split_block(self, block: int) -> Tuple[int, int]:
         return block >> (self.BLOCK_SIZE // 2), block & ((1 << (self.BLOCK_SIZE // 2)) - 1)
@@ -88,7 +86,7 @@ class MagmaGost:
 
     def encrypt_bytes(self, byte_buffer: Union[bytes, bytearray]) -> bytes:
         if len(byte_buffer) < 8:
-            raise ValueError('Byte buffer must contain eight bytes, got %d instead' % len(byte_buffer))
+            byte_buffer = byte_buffer.ljust(8, b'\x00')
 
         # распаковываем исходные 8 байтов в два unsigned int, по 4 байта каждый
         right, left = struct.unpack('@2I', byte_buffer)
@@ -102,7 +100,7 @@ class MagmaGost:
 
     def decrypt_bytes(self, byte_buffer: Union[bytes, bytearray]) -> bytes:
         if len(byte_buffer) != 8:
-            raise ValueError('Byte buffer must contain eight bytes, got %d instead' % len(byte_buffer))
+            byte_buffer = byte_buffer.ljust(8, b'\x00')
 
         right, left = struct.unpack('@2I', byte_buffer)
 
@@ -122,13 +120,16 @@ class MagmaGost:
         if buffer_size % self.BLOCK_SIZE != 0:
             raise ValueError('Buffer size must be a multiple of default block size (64)!')
 
+        pbar = tqdm.tqdm(desc='Зашифрование', total=os.stat(f_in.fileno()).st_size, dynamic_ncols=True, colour='green', leave=True)
         while data := f_in.read(buffer_size):
-            bytes_read = len(data)
+            out_buffer = array.array('B')
+            pbar.update(buffer_size)
             for block in self.split_into_blocks(data):
                 if len(block) < 8:
                     # "добиваем" блок данных незначащими нулями
                     block = block.ljust(8, b'\x00')
-                f_out.write(self.encrypt_bytes(block))
+                out_buffer.extend(self.encrypt_bytes(block))
+            out_buffer.tofile(f_out)
 
     def encrypt_file(self, infile: str, outfile: str, buffer_size: int = 1024):
         if not os.path.isfile(infile) \
@@ -147,17 +148,18 @@ class MagmaGost:
         with open(infile, 'rb') as f_in:
             with open(outfile, 'wb') as f_out:
                 self.decrypt_stream(f_in, f_out, buffer_size)
-
     def decrypt_stream(self, f_in: BinaryIO, f_out: BinaryIO, buffer_size: int = 1024) -> None:
         if buffer_size % self.BLOCK_SIZE != 0:
             raise ValueError('Buffer size must be a multiple of default block size (64)!')
 
         while data := f_in.read(buffer_size):
+            out_buffer = array.array('B')
             for block in self.split_into_blocks(data):
                 if len(block) < 8:
                     # "добиваем" блок данных незначащими нулями
                     block = block.ljust(8, b'\x00')
-                f_out.write(self.decrypt_bytes(block))
+                out_buffer.extend(self.decrypt_bytes(block))
+            out_buffer.tofile(f_out)
 
     def encrypt(self, plaintext: int) -> int:
         if plaintext.bit_length() > 64:
@@ -186,6 +188,16 @@ class MagmaGost:
             left, right = self.__decryption_round(left, right, self.__subkeys[(7 - i) % 8])
 
         return (left << (self.BLOCK_SIZE // 2)) | right
+
+    def read_from_console(self):
+        try:
+            while True:
+                user_input = input('>> ')
+                for block in self.split_into_blocks(bytes(user_input, encoding='utf-8')):
+                    block = self.encrypt_bytes(block)
+                    sys.stdout.buffer.write(block)
+        except KeyboardInterrupt:
+            return 0
 
     @staticmethod
     def circularshift_left(n: int, shift: int, max_bits: int = 32):
@@ -216,8 +228,7 @@ def main():
 
     argparser.add_argument('-k', '--key', dest='key', type=str, metavar='KEY', help='key in hexadecimal notation')
     argparser.add_argument('-i', '--input-file', dest='input', nargs='?', metavar='INFILE',
-        type=argparse.FileType('rb'),
-        default=sys.stdin.buffer
+        type=argparse.FileType('rb'), default=(sys.stding.buffer if not sys.stdin.isatty() else None)
     )
 
     argparser.add_argument('-o', '--outfile', nargs='?', metavar='OUTFILE', dest='output',
@@ -258,6 +269,10 @@ def main():
     except KeyLengthError as e:
         print(e)
         return 1
+
+    if args.input is None and args.output is sys.stdout.buffer:
+        magma.read_from_console()
+        return 0
 
     if args.encrypt:
         magma.encrypt_stream(args.input, args.output, args.buffer_size)
