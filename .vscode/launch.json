@@ -13,11 +13,16 @@
       "cwd": "${workspaceRoot}",
       "args": [
         "--encrypt",
-        "-sbox", "sblocks.csv",
-        "-i", "dostoevsky.txt",
-        "-o", "dostoevsky.enc",
-        "--buffer-size", "512",
-        "--key", "ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        "-sbox",
+        "sblocks.csv",
+        "-i",
+        "input.txt",
+        "-o",
+        "output.enc",
+        "--buffer-size",
+        "1024",
+        "--key",
+        "ffeeddccbbaa99887766554433221100f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
       ],
       "internalConsoleOptions": "openOnSessionStart"
     }

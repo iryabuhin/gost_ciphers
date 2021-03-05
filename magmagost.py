@@ -2,7 +2,7 @@
 import argparse
 import array
 import random
-import string
+import enum
 import struct
 import multiprocessing as mp
 import sys
@@ -10,7 +10,7 @@ import csv
 import os
 import tqdm
 import typing
-from typing import List, Tuple, BinaryIO, Dict, Union, Optional
+from typing import IO, List, Tuple, BinaryIO, Dict, Union, Optional
 from ansi_colors import Colors
 
 
@@ -28,11 +28,11 @@ def get_random_key() -> int:
     return key
 
 
-def bytes_from_file(filename: str, chunksize: int = 8192):
-    with open(filename, 'rb') as f:
-        while chunk := f.read(chunksize):
-            yield from chunk
-
+#  см. ГОСТ 34.13-2015, п. 4.1
+class MagmaPaddingMode(enum.Enum):
+    PAD_MODE_1: int = 1
+    PAD_MODE_2: int = 2
+    PAD_MODE_3: int = 3
 
 class MagmaGost:
     key: int
@@ -40,8 +40,10 @@ class MagmaGost:
     __subkeys: List[int]
 
     BLOCK_SIZE: int = 64
+    BLOCK_SIZE_BYTES: int = 8
     KEY_LENGTH: int = 256
     BUFFER_SIZE: int = 1024
+    PADDING_MODE: MagmaPaddingMode = MagmaPaddingMode.PAD_MODE_1
 
     def __init__(self, key: int, sbox_filepath: str) -> None:
         if key.bit_length() != MagmaGost.KEY_LENGTH:
@@ -85,9 +87,6 @@ class MagmaGost:
         return right ^ self.f(left, round_key), left
 
     def encrypt_bytes(self, byte_buffer: Union[bytes, bytearray]) -> bytes:
-        if len(byte_buffer) < 8:
-            byte_buffer = byte_buffer.ljust(8, b'\x00')
-
         # распаковываем исходные 8 байтов в два unsigned int, по 4 байта каждый
         right, left = struct.unpack('@2I', byte_buffer)
 
@@ -99,9 +98,6 @@ class MagmaGost:
         return struct.pack('@2I', right, left)
 
     def decrypt_bytes(self, byte_buffer: Union[bytes, bytearray]) -> bytes:
-        if len(byte_buffer) != 8:
-            byte_buffer = byte_buffer.ljust(8, b'\x00')
-
         right, left = struct.unpack('@2I', byte_buffer)
 
         for i in range(8):
@@ -131,35 +127,109 @@ class MagmaGost:
                 out_buffer.extend(self.encrypt_bytes(block))
             out_buffer.tofile(f_out)
 
+    def get_padding_size(self, filesize: int) -> int:
+        padding_mode = self.PADDING_MODE
+        if padding_mode is MagmaPaddingMode.PAD_MODE_1:
+            if self.BLOCK_SIZE_BYTES - (filesize % self.BLOCK_SIZE_BYTES) == self.BLOCK_SIZE_BYTES:
+                return 0
+        if padding_mode is MagmaPaddingMode.PAD_MODE_3:
+            if self.BLOCK_SIZE_BYTES - (filesize % self.BLOCK_SIZE_BYTES) == self.BLOCK_SIZE_BYTES:
+                return 0
+
+        return self.BLOCK_SIZE_BYTES - (filesize % self.BLOCK_SIZE_BYTES)
+
+    def set_ecb_padding( self, f_in: BinaryIO, padding_size: int):
+        if padding_size <= 0:
+            return
+
+        if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_1:
+            f_in.seek(0, 2)
+            f_in.write(b'\x00' * (padding_size)) # дополняем блок нулями
+        if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_2:
+            f_in.seek(0, 2)
+            f_in.write(b'\x80') # записываем единицу в первый бит дополнения
+            f_in.write(b'\x00' * padding_size) # дополняем остальное нулями
+        if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_3:
+            f_in.seek(0, 2)
+            f_in.write(b'\x80') # записываем единицу в первый бит дополнения
+            f_in.write(b'\x00' * padding_size) # дополняем остальное нулями
+
     def encrypt_file(self, infile: str, outfile: str, buffer_size: int = 1024):
         if not os.path.isfile(infile) \
                 or (os.path.isfile(outfile) and os.path.samefile(outfile, infile)):
             raise ValueError('Input and output files must exist and not cannot be the same file')
 
-        with open(infile, 'rb') as f_in:
+        filesize = os.path.getsize(infile)
+
+        # индикатор прогресса
+        pbar = tqdm.tqdm(
+            total=filesize,
+            desc='Зашифрование:',
+            leave=True,
+            dynamic_ncols=True,
+            colour='red'
+        )
+
+        with open(infile, 'r+b') as f_in:
             with open(outfile, 'wb') as f_out:
-                self.encrypt_stream(f_in, f_out, buffer_size)
+                while filesize > 0:
+                    if filesize > self.BLOCK_SIZE_BYTES:
+                        block = f_in.read(self.BLOCK_SIZE_BYTES)
+                        f_out.write(
+                            self.encrypt_bytes(block)
+                        )
+                        filesize -= self.BLOCK_SIZE_BYTES
+                        pbar.update(self.BLOCK_SIZE_BYTES)
+                    else: # дополняем неполный блок
+                        pad_len = self.get_padding_size(
+                            os.stat(f_in.fileno()).st_size
+                        )
+                        self.set_ecb_padding( f_in, pad_len)
+
+                        pad_block = f_in.read(self.BLOCK_SIZE_BYTES)
+
+                        f_out.write(
+                            self.encrypt_bytes(pad_block)
+                        )
+                        filesize = 0
+                        pbar.update(pad_len)
 
     def decrypt_file(self, infile: str, outfile: str, buffer_size=1024):
         if not os.path.isfile(infile) \
                 or (os.path.isfile(outfile) and os.path.samefile(outfile, infile)):
             raise ValueError('Input and output files must exist and not cannot be the same file')
 
-        with open(infile, 'rb') as f_in:
-            with open(outfile, 'wb') as f_out:
-                self.decrypt_stream(f_in, f_out, buffer_size)
-    def decrypt_stream(self, f_in: BinaryIO, f_out: BinaryIO, buffer_size: int = 1024) -> None:
-        if buffer_size % self.BLOCK_SIZE != 0:
-            raise ValueError('Buffer size must be a multiple of default block size (64)!')
+        filesize = os.path.getsize(infile)
 
-        while data := f_in.read(buffer_size):
-            out_buffer = array.array('B')
-            for block in self.split_into_blocks(data):
-                if len(block) < 8:
-                    # "добиваем" блок данных незначащими нулями
-                    block = block.ljust(8, b'\x00')
-                out_buffer.extend(self.decrypt_bytes(block))
-            out_buffer.tofile(f_out)
+        # индикатор прогресса
+        pbar = tqdm.tqdm(
+            total=filesize,
+            desc='Расшифрование:',
+            leave=True,
+            dynamic_ncols=True,
+            colour='green'
+        )
+
+        with open(infile, 'r+b') as f_in:
+            with open(outfile, 'wb') as f_out:
+                while filesize > 0:
+                    if filesize > self.BLOCK_SIZE_BYTES:
+                        block = f_in.read(self.BLOCK_SIZE_BYTES)
+                        f_out.write(
+                            self.decrypt_bytes(block)
+                        )
+                        filesize -= self.BLOCK_SIZE_BYTES
+                        pbar.update(self.BLOCK_SIZE_BYTES)
+                    else:
+                        last_block = f_in.read(self.BLOCK_SIZE_BYTES)
+
+                        f_out.write(
+                            self.decrypt_bytes(last_block)
+                        )
+                        filesize = 0
+                        pbar.update(self.BLOCK_SIZE_BYTES)
+
+
 
     def encrypt(self, plaintext: int) -> int:
         if plaintext.bit_length() > 64:
@@ -194,8 +264,12 @@ class MagmaGost:
             while True:
                 user_input = input('>> ')
                 for block in self.split_into_blocks(bytes(user_input, encoding='utf-8')):
+                    if len(block) < MagmaGost.BLOCK_SIZE_BYTES:
+                        block = block.ljust(self.BLOCK_SIZE_BYTES, b'\x00')
+
                     block = self.encrypt_bytes(block)
-                    sys.stdout.buffer.write(block)
+                    sys.stdout.write(block.hex())
+                sys.stdout.write('\n')
         except KeyboardInterrupt:
             return 0
 
@@ -227,13 +301,12 @@ def main():
     )
 
     argparser.add_argument('-k', '--key', dest='key', type=str, metavar='KEY', help='key in hexadecimal notation')
-    argparser.add_argument('-i', '--input-file', dest='input', nargs='?', metavar='INFILE',
-        type=argparse.FileType('rb'), default=(sys.stding.buffer if not sys.stdin.isatty() else None)
+    argparser.add_argument('-i', '--input-file', dest='input', nargs='?', metavar='INFILE'
+        # type=argparse.FileType('rb')
     )
 
-    argparser.add_argument('-o', '--outfile', nargs='?', metavar='OUTFILE', dest='output',
-        type=argparse.FileType('wb'),
-        default=sys.stdout.buffer
+    argparser.add_argument('-o', '--outfile', nargs='?', metavar='OUTFILE', dest='output'
+        # type=argparse.FileType('wb'),
     )
 
     argparser.add_argument('-sbox', '--sbox-filepath', required=True, nargs='?', dest='sbox_filepath',
@@ -252,7 +325,7 @@ def main():
         while len(key := input(f'{Colors.BOLD}{Colors.UNDERLINE}Enter key:{Colors.ENDC} ')) != 64:
             print(Colors.BOLD+Colors.RED + 'Incorrect key length! Must be 64, got', len(key), Colors.ENDC)
         args.key = key
-    
+
     try:
         args.key = int(args.key, 16)
     except ValueError:
@@ -270,14 +343,14 @@ def main():
         print(e)
         return 1
 
-    if args.input is None and args.output is sys.stdout.buffer:
+    if args.input is None and args.output is None:
         magma.read_from_console()
         return 0
 
     if args.encrypt:
-        magma.encrypt_stream(args.input, args.output, args.buffer_size)
+        magma.encrypt_file(args.input, args.output, args.buffer_size)
     else:
-        magma.decrypt_stream(args.input, args.output, args.buffer_size)
+        magma.decrypt_file(args.input, args.output, args.buffer_size)
 
     return 0
 
