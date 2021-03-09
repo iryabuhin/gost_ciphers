@@ -4,6 +4,7 @@ import array
 import random
 import enum
 import struct
+import codecs
 import multiprocessing as mp
 import sys
 import csv
@@ -172,10 +173,11 @@ class MagmaGost:
 
         with open(infile, 'r+b') as f_in:
             with open(outfile, 'wb') as f_out:
+                out_buffer = array.array('B')
                 while filesize > 0:
                     if filesize > self.BLOCK_SIZE_BYTES:
                         block = f_in.read(self.BLOCK_SIZE_BYTES)
-                        f_out.write(
+                        out_buffer.extend(
                             self.encrypt_bytes(block)
                         )
                         filesize -= self.BLOCK_SIZE_BYTES
@@ -188,11 +190,12 @@ class MagmaGost:
 
                         pad_block = f_in.read(self.BLOCK_SIZE_BYTES)
 
-                        f_out.write(
+                        out_buffer.extend(
                             self.encrypt_bytes(pad_block)
                         )
                         filesize = 0
                         pbar.update(pad_len)
+                out_buffer.tofile(f_out)
 
     def decrypt_file(self, infile: str, outfile: str, buffer_size=1024):
         if not os.path.isfile(infile) \
@@ -260,10 +263,12 @@ class MagmaGost:
         return (left << (self.BLOCK_SIZE // 2)) | right
 
     def read_from_console(self):
+        sys.stdin.reconfigure(encoding='ascii', errors='backslashreplace')
         try:
             while True:
                 user_input = input('>> ')
-                for block in self.split_into_blocks(bytes(user_input, encoding='utf-8')):
+                data, data_len = codecs.escape_decode(user_input)
+                for block in self.split_into_blocks(data):
                     if len(block) < MagmaGost.BLOCK_SIZE_BYTES:
                         block = block.ljust(self.BLOCK_SIZE_BYTES, b'\x00')
 
