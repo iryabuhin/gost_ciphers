@@ -30,10 +30,16 @@ def get_random_key() -> int:
 
 
 #  см. ГОСТ 34.13-2015, п. 4.1
-class MagmaPaddingMode(enum.Enum):
+class MagmaPaddingMode(enum.IntEnum):
     PAD_MODE_1: int = 1
     PAD_MODE_2: int = 2
     PAD_MODE_3: int = 3
+
+    def __str__(self) -> str:
+        return self.name
+
+    def __repr__(self) -> str:
+        return str(self)
 
 class MagmaGost:
     key: int
@@ -276,6 +282,7 @@ class MagmaGost:
                     sys.stdout.write(block.hex())
                 sys.stdout.write('\n')
         except KeyboardInterrupt:
+            print(Colors.BOLD + 'Exiting...' + Colors.ENDC)
             return 0
 
     @staticmethod
@@ -322,6 +329,11 @@ def main():
     action_mode.add_argument('-e', '--encrypt', dest='encrypt', help='file to decrypt (stdin if none)', action='store_true')
     action_mode.add_argument('-d', '--decrypt', dest='decrypt', help='file to decrypt (stdout if none)', action='store_true')
 
+    argparser.add_argument('--padding-mode', dest='padding_mode', help='padding mode'
+        metavar='PADDING_MODE', required=False, action='store',
+        type=int, choices=[int(mode.value) for mode in MagmaPaddingMode]
+    )
+
     argparser.add_argument('--buffer-size', dest='buffer_size', action='store', nargs='?', type=int, default=8*1024)
 
     args = argparser.parse_args()
@@ -347,6 +359,9 @@ def main():
     except KeyLengthError as e:
         print(e)
         return 1
+
+    if args.padding_mode is not None:
+        magma.PADDING_MODE = MagmaPaddingMode(args.padding_mode)
 
     if args.input is None and args.output is None:
         magma.read_from_console()
