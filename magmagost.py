@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import argparse
 import array
 import random
@@ -6,6 +5,7 @@ import enum
 import struct
 import codecs
 import multiprocessing as mp
+import binascii
 import sys
 import csv
 import os
@@ -14,6 +14,7 @@ import typing
 from typing import IO, List, Tuple, BinaryIO, Dict, Union, Optional
 from ansi_colors import Colors
 
+SBOX_FILENAME = 'sblocks.txt'
 
 class KeyLengthError(RuntimeError):
     pass
@@ -94,7 +95,6 @@ class MagmaGost:
         return right ^ self.f(left, round_key), left
 
     def encrypt_bytes(self, byte_buffer: Union[bytes, bytearray]) -> bytes:
-        # распаковываем исходные 8 байтов в два unsigned int, по 4 байта каждый
         right, left = struct.unpack('@2I', byte_buffer)
 
         for i in range(8 * 3):
@@ -189,19 +189,22 @@ class MagmaGost:
                         filesize -= self.BLOCK_SIZE_BYTES
                         pbar.update(self.BLOCK_SIZE_BYTES)
                     else: # дополняем неполный блок
-                        fsize = os.stat(f_in.fileno()).st_size
-                        pad_len = self.get_padding_size(fsize)
-                        self.set_ecb_padding(f_in, pad_len)
+                        # fsize = os.stat(f_in.fileno()).st_size
+                        # pad_len = self.get_padding_size(fsize)
+                        # self.set_ecb_padding(f_in, pad_len)
+                        
+                        block = f_in.read(self.BLOCK_SIZE_BYTES)
+                        pad_block = block.ljust(8, b'\x00')
+                        
+                        # f_in.seek( (fsize + pad_len) - 7)
 
-                        f_in.seek( (fsize + pad_len) - 8)
-
-                        pad_block = f_in.read(self.BLOCK_SIZE_BYTES)
+                        # pad_block = f_in.read(self.BLOCK_SIZE_BYTES)
 
                         out_buffer.extend(
                             self.encrypt_bytes(pad_block)
                         )
                         filesize = 0
-                        pbar.update(pad_len)
+                        pbar.update(self.BLOCK_SIZE_BYTES)
                 out_buffer.tofile(f_out)
 
     def decrypt_file(self, infile: str, outfile: str, buffer_size=1024):
@@ -269,7 +272,7 @@ class MagmaGost:
 
         return (left << (self.BLOCK_SIZE // 2)) | right
 
-    def read_from_console(self):
+    def encrypt_from_console(self):
         sys.stdin.reconfigure(encoding='ascii', errors='backslashreplace')
         try:
             while True:
@@ -284,6 +287,29 @@ class MagmaGost:
                 sys.stdout.write('\n')
         except KeyboardInterrupt:
             print(Colors.BOLD + 'Exiting...' + Colors.ENDC)
+            return 0
+        
+    def decrypt_from_console(self):
+        try:
+            while True:
+                user_input = input('>> ')
+                try:
+                    int(user_input, 16)
+                except ValueError:
+                    print('Input must be in hexadecimal!')
+                    continue
+                hex_data = binascii.unhexlify(user_input)
+                
+                for block in self.split_into_blocks(hex_data):
+                    if len(block) < MagmaGost.BLOCK_SIZE_BYTES:
+                        block = block.ljust(self.BLOCK_SIZE_BYTES, b'\x00')
+
+                    block = self.decrypt_bytes(block)
+                    string = block.decode('utf-8')
+                    sys.stdout.write(
+                        string + '\n'
+                    )
+        except KeyboardInterrupt:
             return 0
 
     @staticmethod
@@ -322,8 +348,8 @@ def main():
         # type=argparse.FileType('wb'),
     )
 
-    argparser.add_argument('-sbox', '--sbox-filepath', required=True, nargs='?', dest='sbox_filepath',
-        type=str, help='path to CSV file with S-box values '
+    argparser.add_argument('-sbox', '--sbox-filepath', required=False, nargs='?', dest='sbox_filepath',
+        type=str, help='path to CSV file with S-box values'
     )
 
     action_mode = argparser.add_mutually_exclusive_group(required=True)
@@ -354,7 +380,54 @@ def main():
         print('Overflow occured when converting key to hexadecimal!')
         print('Exiting...')
         return 1
-
+    
+    if not args.sbox_filepath:
+        print('No S-box filepath provided. Would you like to enter them manually?')
+        
+        sbox = list()
+        
+        ok = False
+        while not ok:
+            while len(answer := input('[Y/n] ')) > 1:
+                print('Incorrect input')
+            answer = answer.lower()
+            
+            if answer == 'y':
+                print('Enter S-box row with space separator')
+                rows = 8
+                while rows > 0:
+                    row = list()
+                    try:
+                        row = [int(i) for i in input('>').split()]
+                        rows -= 1
+                    except ValueError:
+                        print('Input is not an integer! Please try again')
+                        rows += 1
+                    if len(row) > 16:
+                        print('Length of S-block row must be 16 equal')
+                        rows += 1
+                    sbox.append(row)
+                
+                with open(SBOX_FILENAME, 'w') as f:
+                    for row in sbox:
+                        f.write(' '.join([str(i) for i in row]) + '\n')
+            elif answer == 'n':
+                print('Attempting to use sblocks from existing file')
+                if not os.path.exists(SBOX_FILENAME):
+                    print('File doesnt exist! Attempting again')
+                
+                with open(SBOX_FILENAME, 'r') as f:
+                    try:
+                        for i in range(8):
+                            row = f.readline()
+                            row = [int(i) for i in row.split()]
+                            sbox.append(row)
+                    except:
+                        ok = False        
+                    else:
+                        ok = True
+            else:
+                print('Unrecognized input! Please try again')
     try:
         magma = MagmaGost(args.key, args.sbox_filepath)
     except KeyLengthError as e:
@@ -365,7 +438,10 @@ def main():
         magma.PADDING_MODE = MagmaPaddingMode(args.padding_mode)
 
     if args.input is None and args.output is None:
-        magma.read_from_console()
+        if args.encrypt:
+            magma.encrypt_from_console()
+        else:
+            magma.decrypt_from_console()
         return 0
 
     if args.encrypt:
