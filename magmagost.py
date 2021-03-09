@@ -328,8 +328,8 @@ def main():
     action_mode = argparser.add_mutually_exclusive_group(required=True)
     action_mode.add_argument('-e', '--encrypt', dest='encrypt', help='file to decrypt (stdin if none)', action='store_true')
     action_mode.add_argument('-d', '--decrypt', dest='decrypt', help='file to decrypt (stdout if none)', action='store_true')
-
-    argparser.add_argument('--padding-mode', dest='padding_mode', help='padding mode'
+    
+    argparser.add_argument('--padding-mode', dest='padding_mode', help='padding mode',
         metavar='PADDING_MODE', required=False, action='store',
         type=int, choices=[int(mode.value) for mode in MagmaPaddingMode]
     )
