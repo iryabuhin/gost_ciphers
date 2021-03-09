@@ -151,15 +151,15 @@ class MagmaGost:
 
         if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_1:
             f_in.seek(0, 2)
-            f_in.write(b'\x00' * (padding_size)) # дополняем блок нулями
+            f_in.write(b'\x00' * (padding_size - 1)) # дополняем блок нулями
         if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_2:
             f_in.seek(0, 2)
             f_in.write(b'\x80') # записываем единицу в первый бит дополнения
-            f_in.write(b'\x00' * padding_size) # дополняем остальное нулями
+            f_in.write(b'\x00' * (padding_size - 1)) # дополняем остальное нулями
         if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_3:
             f_in.seek(0, 2)
             f_in.write(b'\x80') # записываем единицу в первый бит дополнения
-            f_in.write(b'\x00' * padding_size) # дополняем остальное нулями
+            f_in.write(b'\x00' * (padding_size - 1)) # дополняем остальное нулями
 
     def encrypt_file(self, infile: str, outfile: str, buffer_size: int = 1024):
         if not os.path.isfile(infile) \
@@ -189,10 +189,11 @@ class MagmaGost:
                         filesize -= self.BLOCK_SIZE_BYTES
                         pbar.update(self.BLOCK_SIZE_BYTES)
                     else: # дополняем неполный блок
-                        pad_len = self.get_padding_size(
-                            os.stat(f_in.fileno()).st_size
-                        )
-                        self.set_ecb_padding( f_in, pad_len)
+                        fsize = os.stat(f_in.fileno()).st_size
+                        pad_len = self.get_padding_size(fsize)
+                        self.set_ecb_padding(f_in, pad_len)
+
+                        f_in.seek( (fsize + pad_len) - 8)
 
                         pad_block = f_in.read(self.BLOCK_SIZE_BYTES)
 
