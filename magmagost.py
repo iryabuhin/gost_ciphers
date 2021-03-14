@@ -16,6 +16,7 @@ from ansi_colors import Colors
 
 SBOX_FILENAME = 'sblocks.txt'
 
+
 class KeyLengthError(RuntimeError):
     pass
 
@@ -42,6 +43,7 @@ class MagmaPaddingMode(enum.IntEnum):
     def __repr__(self) -> str:
         return str(self)
 
+
 class MagmaGost:
     key: int
     sbox: List[List[int]]
@@ -53,14 +55,18 @@ class MagmaGost:
     BUFFER_SIZE: int = 1024
     PADDING_MODE: MagmaPaddingMode = MagmaPaddingMode.PAD_MODE_1
 
-    def __init__(self, key: int, sbox_filepath: str) -> None:
+    def __init__(self, key: int, sbox) -> None:
         if key.bit_length() != MagmaGost.KEY_LENGTH:
             raise KeyLengthError(
-                'Key must be 256 bits long, current one is %d bit long' % key.bit_length()
+                'Разрядность ключа должна составлять не более 256 битов! (%d передано)' % key.bit_length()
             )
         self.key = key
+
+        if len(sbox) != 8 or not all([len(row) == 16 for row in sbox]):
+            raise ValueError('Некорректный размер S-блоков!')
+
         self.__subkeys = self.expand_key(key)
-        self.sbox = self.load_sbox_from_csv(sbox_filepath)
+        self.sbox = sbox
 
     @staticmethod
     def expand_key(key: int) -> List[int]:
@@ -123,7 +129,8 @@ class MagmaGost:
         if buffer_size % self.BLOCK_SIZE != 0:
             raise ValueError('Buffer size must be a multiple of default block size (64)!')
 
-        pbar = tqdm.tqdm(desc='Зашифрование', total=os.stat(f_in.fileno()).st_size, dynamic_ncols=True, colour='green', leave=True)
+        pbar = tqdm.tqdm(desc='Зашифрование', total=os.stat(f_in.fileno()).st_size, dynamic_ncols=True, colour='green',
+                         leave=True)
         while data := f_in.read(buffer_size):
             out_buffer = array.array('B')
             pbar.update(buffer_size)
@@ -145,21 +152,21 @@ class MagmaGost:
 
         return self.BLOCK_SIZE_BYTES - (filesize % self.BLOCK_SIZE_BYTES)
 
-    def set_ecb_padding( self, f_in: BinaryIO, padding_size: int):
+    def set_ecb_padding(self, f_in: BinaryIO, padding_size: int):
         if padding_size <= 0:
             return
 
         if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_1:
             f_in.seek(0, 2)
-            f_in.write(b'\x00' * (padding_size - 1)) # дополняем блок нулями
+            f_in.write(b'\x00' * (padding_size - 1))  # дополняем блок нулями
         if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_2:
             f_in.seek(0, 2)
-            f_in.write(b'\x80') # записываем единицу в первый бит дополнения
-            f_in.write(b'\x00' * (padding_size - 1)) # дополняем остальное нулями
+            f_in.write(b'\x80')  # записываем единицу в первый бит дополнения
+            f_in.write(b'\x00' * (padding_size - 1))  # дополняем остальное нулями
         if self.PADDING_MODE is MagmaPaddingMode.PAD_MODE_3:
             f_in.seek(0, 2)
-            f_in.write(b'\x80') # записываем единицу в первый бит дополнения
-            f_in.write(b'\x00' * (padding_size - 1)) # дополняем остальное нулями
+            f_in.write(b'\x80')  # записываем единицу в первый бит дополнения
+            f_in.write(b'\x00' * (padding_size - 1))  # дополняем остальное нулями
 
     def encrypt_file(self, infile: str, outfile: str, buffer_size: int = 1024):
         if not os.path.isfile(infile) \
@@ -188,17 +195,9 @@ class MagmaGost:
                         )
                         filesize -= self.BLOCK_SIZE_BYTES
                         pbar.update(self.BLOCK_SIZE_BYTES)
-                    else: # дополняем неполный блок
-                        # fsize = os.stat(f_in.fileno()).st_size
-                        # pad_len = self.get_padding_size(fsize)
-                        # self.set_ecb_padding(f_in, pad_len)
-                        
+                    else:  # дополняем неполный блок
                         block = f_in.read(self.BLOCK_SIZE_BYTES)
                         pad_block = block.ljust(8, b'\x00')
-                        
-                        # f_in.seek( (fsize + pad_len) - 7)
-
-                        # pad_block = f_in.read(self.BLOCK_SIZE_BYTES)
 
                         out_buffer.extend(
                             self.encrypt_bytes(pad_block)
@@ -241,8 +240,6 @@ class MagmaGost:
                         )
                         filesize = 0
                         pbar.update(self.BLOCK_SIZE_BYTES)
-
-
 
     def encrypt(self, plaintext: int) -> int:
         if plaintext.bit_length() > 64:
@@ -288,7 +285,7 @@ class MagmaGost:
         except KeyboardInterrupt:
             print(Colors.BOLD + 'Exiting...' + Colors.ENDC)
             return 0
-        
+
     def decrypt_from_console(self):
         try:
             while True:
@@ -299,7 +296,7 @@ class MagmaGost:
                     print('Input must be in hexadecimal!')
                     continue
                 hex_data = binascii.unhexlify(user_input)
-                
+
                 for block in self.split_into_blocks(hex_data):
                     if len(block) < MagmaGost.BLOCK_SIZE_BYTES:
                         block = block.ljust(self.BLOCK_SIZE_BYTES, b'\x00')
@@ -316,23 +313,6 @@ class MagmaGost:
     def circularshift_left(n: int, shift: int, max_bits: int = 32):
         return ((n << shift) | (n >> (max_bits - shift))) & ((1 << max_bits) - 1)
 
-    @staticmethod
-    def load_sbox_from_csv(filepath: str, delimiter=',') -> List[List[int]]:
-        data = list()
-        try:
-            with open(filepath, 'r') as csv_file:
-                csv_reader = csv.reader(csv_file, delimiter=delimiter)
-                for row in csv_reader:
-                    data.append([int(n) for n in row])
-
-            # проверка на корректность структуры S-блоков
-            if len(data) != 8 or not all([len(row) == 16 for row in data]):
-                raise ValueError('The dimensions of the substitution table must be 8x16!')
-            return data
-
-        except IOError as e:
-            raise RuntimeError("S-box file %s doesn't exist or isn't readable" % filepath)
-
 
 def main():
     argparser = argparse.ArgumentParser(
@@ -340,82 +320,79 @@ def main():
     )
 
     argparser.add_argument('-k', '--key', dest='key', type=str, metavar='KEY', help='key in hexadecimal notation')
-    argparser.add_argument('-i', '--input-file', dest='input', nargs='?', metavar='INFILE'
-        # type=argparse.FileType('rb')
-    )
 
-    argparser.add_argument('-o', '--outfile', nargs='?', metavar='OUTFILE', dest='output'
-        # type=argparse.FileType('wb'),
-    )
+    argparser.add_argument('-i', '--input-file', dest='input', nargs='?', metavar='INFILE')
+    argparser.add_argument('-o', '--outfile', nargs='?', metavar='OUTFILE', dest='output')
 
     argparser.add_argument('-sbox', '--sbox-filepath', required=False, nargs='?', dest='sbox_filepath',
-        type=str, help='path to CSV file with S-box values'
-    )
+                           type=str, help='path to CSV file with S-box values'
+                           )
 
     action_mode = argparser.add_mutually_exclusive_group(required=True)
-    action_mode.add_argument('-e', '--encrypt', dest='encrypt', help='file to decrypt (stdin if none)', action='store_true')
-    action_mode.add_argument('-d', '--decrypt', dest='decrypt', help='file to decrypt (stdout if none)', action='store_true')
-    
-    argparser.add_argument('--padding-mode', dest='padding_mode', help='padding mode',
-        metavar='PADDING_MODE', required=False, action='store',
-        type=int, choices=[int(mode.value) for mode in MagmaPaddingMode]
-    )
+    action_mode.add_argument('-e', '--encrypt', dest='encrypt', help='file to decrypt (stdin if none)',
+                             action='store_true')
+    action_mode.add_argument('-d', '--decrypt', dest='decrypt', help='file to decrypt (stdout if none)',
+                             action='store_true')
 
-    argparser.add_argument('--buffer-size', dest='buffer_size', action='store', nargs='?', type=int, default=8*1024)
+    argparser.add_argument('--padding-mode', dest='padding_mode', help='padding mode',
+                           metavar='PADDING_MODE', required=False, action='store',
+                           type=int, choices=[int(mode.value) for mode in MagmaPaddingMode]
+                           )
+
+    argparser.add_argument('--buffer-size', dest='buffer_size', action='store', nargs='?', type=int, default=(2 << 12))
 
     args = argparser.parse_args()
 
     if not args.key:
-        while len(key := input(f'{Colors.BOLD}{Colors.UNDERLINE}Enter key:{Colors.ENDC} ')) != 64:
-            print(Colors.BOLD+Colors.RED + 'Incorrect key length! Must be 64, got', len(key), Colors.ENDC)
+        while len(key := input(f'{Colors.BOLD}{Colors.UNDERLINE}Введите ключ в шестнадцатеричном формате:{Colors.ENDC} ')) != 64:
+            print(Colors.BOLD + Colors.RED + 'Некорректная длина ключа! Должно быть 64, сейчас -', len(key), Colors.ENDC)
         args.key = key
 
     try:
         args.key = int(args.key, 16)
     except ValueError:
-        print(Colors.RED + 'Error converting key to integer!' + Colors.ENDC)
-        print(Colors.BOLD + Colors.RED + 'Exiting...' + Colors.ENDC)
+        print(Colors.RED + 'Произошла ошибка при переводе ключа в шестандцатеричное число!' + Colors.ENDC)
+        print(Colors.BOLD + Colors.RED + 'Выход...' + Colors.ENDC)
         return 1
-    except OverflowError:
-        print('Overflow occured when converting key to hexadecimal!')
-        print('Exiting...')
-        return 1
-    
+
+    sbox = list()
     if not args.sbox_filepath:
-        print('No S-box filepath provided. Would you like to enter them manually?')
-        
-        sbox = list()
-        
+        print('Вы не предоставили путь к файлу с S-блоками. Хотите ввести их с клавиатуры?')
+
         ok = False
         while not ok:
             while len(answer := input('[Y/n] ')) > 1:
-                print('Incorrect input')
+                print('Некорректный ввод!')
             answer = answer.lower()
-            
-            if answer == 'y':
-                print('Enter S-box row with space separator')
-                rows = 8
-                while rows > 0:
-                    row = list()
+
+            if answer == 'y' or answer == '':
+                print('Введите S-блоки построчно с пробелом в качестве разделителя:')
+                rows = 0
+                while rows < 8:
                     try:
-                        row = [int(i) for i in input('>').split()]
-                        rows -= 1
+                        row = [int(i) for i in input(f'({str(rows + 1)})> ').split()]
                     except ValueError:
-                        print('Input is not an integer! Please try again')
-                        rows += 1
-                    if len(row) > 16:
-                        print('Length of S-block row must be 16 equal')
-                        rows += 1
+                        print('Возникла ошибка при обработке введенных чисел. Попробуйте еще раз')
+                        continue
+                    if len(row) != 16:
+                        print('Длина одного ряда S-блока должна составлять 16 чисел!')
+                        continue
                     sbox.append(row)
-                
+                    rows += 1
+
                 with open(SBOX_FILENAME, 'w') as f:
-                    for row in sbox:
-                        f.write(' '.join([str(i) for i in row]) + '\n')
+                    f.write('\n'.join([
+                        ' '.join([str(num) for num in row])
+                        for row in sbox
+                    ]))
+                ok = True
+
             elif answer == 'n':
-                print('Attempting to use sblocks from existing file')
+                print('Пытаюсь считать S-блоки из файла...')
                 if not os.path.exists(SBOX_FILENAME):
-                    print('File doesnt exist! Attempting again')
-                
+                    print('Файл с S-блоками не найден!')
+                    continue
+
                 with open(SBOX_FILENAME, 'r') as f:
                     try:
                         for i in range(8):
@@ -423,15 +400,24 @@ def main():
                             row = [int(i) for i in row.split()]
                             sbox.append(row)
                     except:
-                        ok = False        
+                        ok = False
                     else:
                         ok = True
             else:
-                print('Unrecognized input! Please try again')
+                print('Некорректный ввод!')
+    else:
+        try:
+            with open(args.sbox_filepath, 'r') as csv_file:
+                csv_reader = csv.reader(csv_file, delimiter=',')
+                for row in csv_reader:
+                    sbox.append([int(n) for n in row])
+        except IOError:
+            raise RuntimeError("S-box file %s doesn't exist or isn't readable" % args.sbox_filepath)
+    
     try:
-        magma = MagmaGost(args.key, args.sbox_filepath)
-    except KeyLengthError as e:
-        print(e)
+        magma = MagmaGost(args.key, sbox)
+    except KeyLengthError as err:
+        print(err)
         return 1
 
     if args.padding_mode is not None:
@@ -450,6 +436,7 @@ def main():
         magma.decrypt_file(args.input, args.output, args.buffer_size)
 
     return 0
+
 
 if __name__ == '__main__':
     sys.exit(main())
