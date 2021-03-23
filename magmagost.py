@@ -371,6 +371,9 @@ def main():
                 while rows < 8:
                     try:
                         row = [int(i) for i in input(f'({str(rows + 1)})> ').split()]
+                        if not all(map(lambda x: x < 16, row)):
+                            print('Значения S-блоков должны находиться в пределах 4 битов!')
+                            continue
                     except ValueError:
                         print('Возникла ошибка при обработке введенных чисел. Попробуйте еще раз')
                         continue
